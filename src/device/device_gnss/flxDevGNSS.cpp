@@ -21,6 +21,9 @@
 
 #include "flxDevGNSS.h"
 
+// u-blox CFG-NAVSPG-DYNMODEL value for "Airborne <1g"
+static const uint8_t kGNSSDynModelAirborne1g = 6;
+
 // Define our class static variables - allocs storage for them
 
 #define kGNSSAddressDefault 0x42 // GNSS_ADDR
@@ -186,15 +189,31 @@ bool flxDevGNSS::onInitialize(TwoWire &wirePort)
         SFE_UBLOX_GNSS::setI2COutput(COM_TYPE_UBX); // Set the I2C port to output UBX only (turn off NMEA noise)
         SFE_UBLOX_GNSS::setAutoPVT(true);           // Enable PVT at the navigation rate
 
-        // GURT-1: the u-blox default "Portable" model stops reporting fixes above 12 km. The balloon
-        // flies to ~30 km, so use "Airborne <1g" (rated to 50 km). Set on every boot, not saved.
-        if (!SFE_UBLOX_GNSS::setDynamicModel(DYN_MODEL_AIRBORNE1g))
-            flxLog_W(F("%s: unable to set the airborne dynamic model - fixes stop above 12 km"), name());
-
         // Save the port and message settings to flash and BBR
         SFE_UBLOX_GNSS::saveConfigSelective(VAL_CFG_SUBSEC_IOPORT | VAL_CFG_SUBSEC_MSGCONF);
         delay(1100);
         SFE_UBLOX_GNSS::getPVT(); // Ensure we get fresh data
+
+        // GURT-1: the u-blox default "Portable" dynamic model stops reporting fixes above 12 km and
+        // the balloon flies to ~30 km, so select "Airborne <1g" (rated to 50 km).
+        //
+        // This is done with the module's per-key configuration interface, touching that one key
+        // and nothing else. Do NOT use the library's setDynamicModel(): it polls the legacy
+        // UBX-CFG-NAV5 block and writes the whole block back. With that call in place this M10
+        // module tracked satellites and kept time for 27 minutes by a window without ever producing
+        // a fix; a factory default of the module got it computing again within a minute (2026-09-20).
+        //
+        // RAM layer only, and after the save above, so the setting can never be persisted into the
+        // module: it is simply applied again on every boot.
+        SFE_UBLOX_GNSS::setVal8(UBLOX_CFG_NAVSPG_DYNMODEL, kGNSSDynModelAirborne1g, VAL_LAYER_RAM);
+
+        // Report what the module actually holds, so a boot log shows it (6 = airborne <1g).
+        uint8_t dynModel = SFE_UBLOX_GNSS::getVal8(UBLOX_CFG_NAVSPG_DYNMODEL, VAL_LAYER_RAM);
+        if (dynModel == kGNSSDynModelAirborne1g)
+            flxLog_I(F("%s: dynamic model %u (airborne <1g)"), name(), dynModel);
+        else
+            flxLog_W(F("%s: dynamic model is %u, expected %u - fixes will stop above 12 km"), name(), dynModel,
+                     kGNSSDynModelAirborne1g);
 
         // Enable our update job
         flxAddJobToQueue(_theJob);
