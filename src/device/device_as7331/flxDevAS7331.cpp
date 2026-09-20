@@ -45,6 +45,23 @@ flxDevAS7331::flxDevAS7331() : _gain{GAIN_256}, _convTime{TIME_64MS}, _valid_dat
     flxRegister(temperatureC, "Temperature", "Sensor temperature (C)");
 }
 
+// Detection constants. OSR (0x00) is writable in both sensor states.
+static const uint8_t kAS7331RegOSR = 0x00;
+static const uint8_t kAS7331RegAGEN = 0x02;
+static const uint8_t kAS7331DeviceID = 0x21;
+static const uint8_t kAS7331OSRSoftwareReset = 0x4A; // SW_RES=1, power down, DOS=010 (configuration)
+static const uint32_t kAS7331ResetDelayMS = 10;
+static const uint8_t kAS7331FirstSharedAddress = 0x76; // 0x76/0x77 are shared with pressure sensors
+
+// Returns the device ID byte, or 0 if the read fails.
+static uint8_t as7331ReadDeviceID(flxBusI2C &i2cDriver, uint8_t address)
+{
+    uint16_t agenValue;
+    if (!i2cDriver.readRegister16(address, kAS7331RegAGEN, &agenValue, true)) // Little Endian
+        return 0;
+    return agenValue & 0xFF;
+}
+
 //----------------------------------------------------------------------------------------------------------
 /// @brief  Static method called to determine if device is connected
 ///
@@ -64,16 +81,27 @@ bool flxDevAS7331::isConnected(flxBusI2C &i2cDriver, uint8_t address)
     if (!i2cDriver.ping(address))
         return false;
 
-    // The AS7331 uses 16-bit register reads. Read AGEN register (0x02) which contains
-    // the device ID. On power-up the device is in configuration mode, so this register
-    // is accessible without mode switching.
-    uint16_t agenValue;
-    if (!i2cDriver.readRegister16(address, 0x02, &agenValue, true)) // Little Endian
+    // The device ID is in the AGEN register (0x02), low byte: upper nibble = device ID (0x2),
+    // lower = mutation (0x1). Expected: 0x21.
+    //
+    // AGEN is only visible in the sensor's CONFIGURATION state. That is the state after a cold
+    // power-on, but once this driver has started the sensor it sits in MEASUREMENT state, where
+    // 0x02 is a UV result instead. If the ESP32 restarts while the sensor keeps its power (watchdog,
+    // brown-out, firmware update, !restart), the ID read fails and the sensor would be skipped.
+    // So if the ID does not match, software-reset the sensor - which returns it to its power-on
+    // state - and look once more. A cold boot never takes this path.
+    if (as7331ReadDeviceID(i2cDriver, address) == kAS7331DeviceID)
+        return true;
+
+    // Never write to 0x76/0x77 while probing: Bosch and TE pressure sensors (BMP384, BME280,
+    // MS5637...) live there, and this driver is asked about those addresses before they are.
+    if (address >= kAS7331FirstSharedAddress)
         return false;
 
-    // Low byte contains the AGEN value: upper nibble = device ID (0x2), lower = mutation (0x1)
-    // Expected: 0x21
-    return (agenValue & 0xFF) == 0x21;
+    i2cDriver.writeRegister(address, kAS7331RegOSR, kAS7331OSRSoftwareReset);
+    delay(kAS7331ResetDelayMS);
+
+    return as7331ReadDeviceID(i2cDriver, address) == kAS7331DeviceID;
 }
 
 //----------------------------------------------------------------------------------------------------------
