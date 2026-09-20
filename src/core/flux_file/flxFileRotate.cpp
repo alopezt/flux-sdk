@@ -12,6 +12,9 @@
 #include "flxClock.h"
 #include "flxUtils.h"
 
+#include <Arduino.h>
+#include <cstring>
+
 // number of writes between flushes
 const int kFlushIncrement = 2;
 
@@ -128,6 +131,36 @@ void flxFileRotate::write(float value)
 //------------------------------------------------------------------------------------------------
 void flxFileRotate::write(const char *value, bool newline, flxLineType_t type)
 {
+    // Mirror every telemetry data record out UART2 TX (GPIO17, 115200 8N1,
+    // RX unmapped) for an off-board downlink. This is the same record the SD
+    // card receives, in whatever format (JSON, CSV, ...) is configured - the
+    // formatter has already serialized it before calling write(). Done before
+    // the SD-state checks so the downlink keeps flowing with no card inserted.
+    if (type == flxLineTypeData && value)
+    {
+        static bool s_uart2MirrorStarted = false;
+        if (!s_uart2MirrorStarted)
+        {
+            // An 8 KB TX ring buffer must be installed before begin(). With it,
+            // the IDF UART driver drains to the wire in the background, so
+            // write() just copies into the buffer instead of blocking the
+            // logger at line rate (the default txBufferSize==0 path blocks
+            // until bytes clock out of the 128-byte hardware FIFO).
+            Serial2.setTxBufferSize(8192);
+            Serial2.begin(115200, SERIAL_8N1, -1, 17);
+            s_uart2MirrorStarted = true;
+        }
+        // Best-effort, non-blocking: uart_write_bytes() blocks until the whole
+        // payload fits the ring buffer, so only emit when the record + newline
+        // already fits the free space. A slow/absent downstream link drops
+        // telemetry records here; it never backpressures logging or SD writes.
+        size_t len = strlen(value);
+        if (Serial2.availableForWrite() >= (int)(len + 1))
+        {
+            Serial2.write((const uint8_t *)value, len);
+            Serial2.write((uint8_t)'\n');
+        }
+    }
 
     if (!_theFS)
         return;
