@@ -156,7 +156,7 @@ bool flxDeviceFactory::registerDevice(flxDeviceBuilderI2C *deviceBuilder)
 //    The count of devices connected and the driver was successfully created...
 ///////////////////////////////////////////////////////////////////////////////////////
 
-int flxDeviceFactory::buildDevices(flxBusI2C &i2cDriver)
+int flxDeviceFactory::buildDevices(flxBusI2C &i2cDriver, bool bLastPass)
 {
     if (!_buildersByAddress)
     {
@@ -224,8 +224,11 @@ int flxDeviceFactory::buildDevices(flxBusI2C &i2cDriver)
     }
 
     // done - no longer need the builders list/data
-    delete _buildersByAddress;
-    _buildersByAddress = nullptr;
+    if (bLastPass)
+    {
+        delete _buildersByAddress;
+        _buildersByAddress = nullptr;
+    }
 
     // flxLog_I("DEBUG: BUILD - MAP DELETE >>>AFTER<<< -  Free Heap: %d", ESP.getFreeHeap());
 

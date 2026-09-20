@@ -17,6 +17,11 @@
 #include "flxSettings.h"
 #include "flxStorage.h"
 
+// Device autoload: number of I2C scan passes at startup, and the pause between them
+static const int kAutoloadPasses = 3;
+static const uint32_t kAutoloadPassDelayMS = 1000;
+
+
 // for logging - define output driver on the stack
 
 static flxLoggingDrvDefault _logDriver;
@@ -90,9 +95,20 @@ bool flxFlux::start()
 
     flxBusI2C thei2cBus = i2cDriver();
 
-    // Build drivers for the registered devices connected to the system
+    // Build drivers for the registered devices connected to the system.
+    //
+    // Scan more than once. The application switches the Qwiic power rail on moments before this
+    // runs, and some sensors (SCD4x, u-blox GNSS) need a second or more to answer - longer when
+    // cold. A device missed here stays missing until the next reboot.
     if (_deviceAutoload)
-        flxDeviceFactory::get().buildDevices(thei2cBus);
+    {
+        for (int pass = 1; pass <= kAutoloadPasses; pass++)
+        {
+            flxDeviceFactory::get().buildDevices(thei2cBus, pass == kAutoloadPasses);
+            if (pass < kAutoloadPasses)
+                delay(kAutoloadPassDelayMS);
+        }
+    }
 
     if (_theApplication)
         _theApplication->onDeviceLoad();

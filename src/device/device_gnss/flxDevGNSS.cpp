@@ -186,6 +186,11 @@ bool flxDevGNSS::onInitialize(TwoWire &wirePort)
         SFE_UBLOX_GNSS::setI2COutput(COM_TYPE_UBX); // Set the I2C port to output UBX only (turn off NMEA noise)
         SFE_UBLOX_GNSS::setAutoPVT(true);           // Enable PVT at the navigation rate
 
+        // GURT-1: the u-blox default "Portable" model stops reporting fixes above 12 km. The balloon
+        // flies to ~30 km, so use "Airborne <1g" (rated to 50 km). Set on every boot, not saved.
+        if (!SFE_UBLOX_GNSS::setDynamicModel(DYN_MODEL_AIRBORNE1g))
+            flxLog_W(F("%s: unable to set the airborne dynamic model - fixes stop above 12 km"), name());
+
         // Save the port and message settings to flash and BBR
         SFE_UBLOX_GNSS::saveConfigSelective(VAL_CFG_SUBSEC_IOPORT | VAL_CFG_SUBSEC_MSGCONF);
         delay(1100);

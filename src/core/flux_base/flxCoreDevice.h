@@ -295,7 +295,9 @@ class flxDeviceFactory
     };
 
     // Called to build a list of device objects for the devices connected to the system.
-    int buildDevices(flxBusI2C &);
+    // Safe to call more than once: addresses that already have a device are skipped. The builder
+    // list is freed on the last pass.
+    int buildDevices(flxBusI2C &, bool bLastPass = true);
 
     void pruneAutoload(flxDevice *, flxDeviceContainer &);
 
