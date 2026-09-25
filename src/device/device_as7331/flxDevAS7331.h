@@ -64,22 +64,23 @@ class flxDevAS7331 : public flxDeviceI2CType<flxDevAS7331>, public SfeAS7331ArdI
     void set_conv_time(uint16_t);
     uint16_t _convTime;
 
-    // UV channel accessors — values cached by execute()
+    // UV channel accessors — values cached by execute(). After a failed read they are NAN, which the
+    // JSON log writes as null: missing, never zero.
     float get_uva_value(void)
     {
-        return _valid_data ? getUVA() : 0.0f;
+        return _valid_data ? getUVA() : NAN;
     }
     float get_uvb_value(void)
     {
-        return _valid_data ? getUVB() : 0.0f;
+        return _valid_data ? getUVB() : NAN;
     }
     float get_uvc_value(void)
     {
-        return _valid_data ? getUVC() : 0.0f;
+        return _valid_data ? getUVC() : NAN;
     }
     float get_temp_value(void)
     {
-        return _valid_data ? getTemp() : 0.0f;
+        return _valid_data ? getTemp() : NAN;
     }
 
     bool _valid_data;

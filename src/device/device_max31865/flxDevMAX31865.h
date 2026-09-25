@@ -58,14 +58,15 @@ class flxDevMAX31865 : public flxDeviceSPIType<flxDevMAX31865>
     void set_filter_50hz(bool);
     bool _filter50Hz;
 
-    // Data accessors — values cached by execute()
+    // Data accessors — values cached by execute(). After a failed read the temperature and resistance
+    // are NAN, which the JSON log writes as null: missing, never zero.
     float get_temperature(void)
     {
-        return _valid_data ? _temperature : 0.0f;
+        return _valid_data ? _temperature : NAN;
     }
     float get_resistance(void)
     {
-        return _valid_data ? _resistance : 0.0f;
+        return _valid_data ? _resistance : NAN;
     }
     uint16_t get_raw_rtd(void)
     {
