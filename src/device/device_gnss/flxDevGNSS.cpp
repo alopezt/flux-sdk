@@ -203,11 +203,14 @@ bool flxDevGNSS::onInitialize(TwoWire &wirePort)
         // module tracked satellites and kept time for 27 minutes by a window without ever producing
         // a fix; a factory default of the module got it computing again within a minute (2026-09-20).
         //
-        // RAM layer only, and after the save above, so the setting can never be persisted into the
-        // module: it is simply applied again on every boot.
-        SFE_UBLOX_GNSS::setVal8(UBLOX_CFG_NAVSPG_DYNMODEL, kGNSSDynModelAirborne1g, VAL_LAYER_RAM);
+        // Written to RAM and to battery-backed RAM (BBR); the SAM-M10Q has no flash. A module that loses
+        // power while its backup cell holds rebuilds RAM from BBR, and comes back airborne only if BBR
+        // holds the model. (The save above is not selective on this module: protocol 34 copies the whole
+        // RAM configuration to BBR, so what BBR held before depended on when the ESP32 last restarted.)
+        SFE_UBLOX_GNSS::setVal8(UBLOX_CFG_NAVSPG_DYNMODEL, kGNSSDynModelAirborne1g, VAL_LAYER_RAM | VAL_LAYER_BBR);
 
-        // Report what the module actually holds, so a boot log shows it (6 = airborne <1g).
+        // Report what the module actually holds, so a boot log shows it (6 = airborne <1g). RAM only:
+        // the library cannot read the BBR layer back.
         uint8_t dynModel = SFE_UBLOX_GNSS::getVal8(UBLOX_CFG_NAVSPG_DYNMODEL, VAL_LAYER_RAM);
         if (dynModel == kGNSSDynModelAirborne1g)
             flxLog_I(F("%s: dynamic model %u (airborne <1g)"), name(), dynModel);
@@ -432,6 +435,9 @@ void flxDevGNSS::factory_default()
     SFE_UBLOX_GNSS::setI2COutput(COM_TYPE_UBX);
     SFE_UBLOX_GNSS::setAutoPVT(true);
     SFE_UBLOX_GNSS::saveConfigSelective(VAL_CFG_SUBSEC_IOPORT | VAL_CFG_SUBSEC_MSGCONF);
+
+    // GURT-1: the factory default restored the "Portable" model; select airborne again (see onInitialize()).
+    SFE_UBLOX_GNSS::setVal8(UBLOX_CFG_NAVSPG_DYNMODEL, kGNSSDynModelAirborne1g, VAL_LAYER_RAM | VAL_LAYER_BBR);
 }
 
 //----------------------------------------------------------------------------------------------------------
