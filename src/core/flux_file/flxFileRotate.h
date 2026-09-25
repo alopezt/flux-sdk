@@ -40,7 +40,9 @@ class flxFileRotate : public flxActionType<flxFileRotate>, public flxWriter
     }
 
   public:
-    flxFileRotate() : _currentFilename{""}, _theFS{nullptr}, _flushCount{0}, _secsRotPeriod{0}, _headerWritten{false}
+    flxFileRotate()
+        : _currentFilename{""}, _theFS{nullptr}, _flushCount{0}, _secsRotPeriod{0}, _headerWritten{false},
+          _sizeAtLastFlush{0}, _reopenAfterWriteError{false}
     {
 
         setName("File Rotate", "Writes output to a file. Rotates files after a given time period.");
@@ -100,6 +102,8 @@ class flxFileRotate : public flxActionType<flxFileRotate>, public flxWriter
     bool openNextLogFile();
     bool openCurrentFile(void);
     bool openLogFile(bool bAppend = false);
+    bool logFileStoppedGrowing(void);
+    void closeLogFileAfterWriteError(void);
 
     std::string _currentFilename;
     flxIFileSystem *_theFS;
@@ -109,4 +113,8 @@ class flxFileRotate : public flxActionType<flxFileRotate>, public flxWriter
     flxFSFile _currentFile;
 
     bool _headerWritten;
+
+    // GURT-1: recovery from a failed SD write (see write())
+    size_t _sizeAtLastFlush;
+    bool _reopenAfterWriteError;
 };

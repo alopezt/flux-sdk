@@ -56,6 +56,7 @@ bool flxFileRotate::openLogFile(bool bAppend)
         return false;
     }
     _flushCount = 0; // new file, new start
+    _sizeAtLastFlush = 0;
 
     return true;
 }
@@ -83,6 +84,31 @@ bool flxFileRotate::openCurrentFile(void)
 
     return openLogFile(bExists); // send in true for append mode if file exists.
 }
+//------------------------------------------------------------------------------------------------
+// GURT-1: when a sector write fails inside FatFs's f_write, every later write to that open file fails
+// too (a sticky error that only reopening clears), and flush() reports nothing. The failure shows only
+// as a log file that stopped growing. size() reads the directory entry, which every successful flush
+// updates.
+bool flxFileRotate::logFileStoppedGrowing(void)
+{
+    size_t size = _currentFile.size();
+    bool stoppedGrowing = size <= _sizeAtLastFlush;
+    _sizeAtLastFlush = size;
+
+    return stoppedGrowing;
+}
+
+//------------------------------------------------------------------------------------------------
+// GURT-1: close the log file; the next write() reopens the same file in append mode.
+void flxFileRotate::closeLogFileAfterWriteError(void)
+{
+    flxLog_W(F("%s: log file %s stopped growing - reopening it"), name(), _currentFilename.c_str());
+
+    _currentFile.close();
+    _currentFile = flxFSFile(); // "null file"
+    _reopenAfterWriteError = true;
+}
+
 //------------------------------------------------------------------------------------------------
 // Open the next log file.
 
@@ -165,6 +191,16 @@ void flxFileRotate::write(const char *value, bool newline, flxLineType_t type)
     if (!_theFS)
         return;
 
+    // GURT-1: a log file closed after a write error is reopened in append mode, retrying on every write
+    // until that succeeds. Never through the no-file path below: when a read error hides the existing
+    // file, that path opens it with "w" and truncates the log.
+    if (_reopenAfterWriteError)
+    {
+        if (!openLogFile(true))
+            return;
+        _reopenAfterWriteError = false;
+    }
+
     // no file - system just starting up?
     if (!_currentFile)
     {
@@ -222,5 +258,10 @@ void flxFileRotate::write(const char *value, bool newline, flxLineType_t type)
     // flush the file buffer?
     _flushCount = (_flushCount + 1) % kFlushIncrement;
     if (!_flushCount)
+    {
         _currentFile.flush();
+
+        if (logFileStoppedGrowing())
+            closeLogFileAfterWriteError();
+    }
 }
