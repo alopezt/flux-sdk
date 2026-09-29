@@ -125,6 +125,21 @@ class flxDevGNSS : public flxDeviceI2CType<flxDevGNSS>, public flxIClock, public
 
     bool get_location(flxDataArrayFloat *);
 
+    // GURT-1: the receiver's view of the sky, from its satellite report (UBX-NAV-SAT).
+    float read_sats_in_view();
+    float read_sats_with_signal();
+    float read_best_cn0();
+    float read_top4_cn0();
+    bool signalCurrent(void);
+    void enableSignalReport(void);
+
+    bool _signalSeen;        // a satellite report has been summarised since boot
+    uint32_t _signalAt;      // millis() of the newest one
+    uint8_t _satsInView;     // its summary
+    uint8_t _satsWithSignal;
+    float _bestCN0;
+    float _top4CN0;
+
     bool _bPPSLoggingEnabled; // flag to indicate if PPS logging is enabled
     uint16_t _ppsPin;         // interrupt pin number for PPS logging event detection.
     bool _ppsLoggingIsSetup;
@@ -173,6 +188,18 @@ class flxDevGNSS : public flxDeviceI2CType<flxDevGNSS>, public flxIClock, public
 
     // position
     flxParameterOutArrayFloat<flxDevGNSS, &flxDevGNSS::get_location> location;
+
+    // GURT-1: signal diagnostics, NAN (logged as null) while no satellite report is current
+    flxParameterOutFloat<flxDevGNSS, &flxDevGNSS::read_sats_in_view> satsInView;
+    flxParameterOutFloat<flxDevGNSS, &flxDevGNSS::read_sats_with_signal> satsWithSignal;
+    flxParameterOutFloat<flxDevGNSS, &flxDevGNSS::read_best_cn0> bestCN0;
+    flxParameterOutFloat<flxDevGNSS, &flxDevGNSS::read_top4_cn0> top4CN0;
+
+    // GURT-1: a satellite report reduced to the four values above. A satellite is in view when it is heard
+    // or its elevation is known and 0 to 90 degrees; it has a signal when its C/N0 is above 0 dB-Hz. The
+    // top-4 value is the mean of the four strongest signals, of fewer when fewer have one, and 0 with none.
+    static void summariseSignal(const UBX_NAV_SAT_data_t &report, uint8_t &inView, uint8_t &withSignal,
+                                float &best, float &top4);
 
     //-----------------------------------------------------
     // methods to set/get PPS pin number

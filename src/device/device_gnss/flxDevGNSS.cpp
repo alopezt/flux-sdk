@@ -24,6 +24,10 @@
 // u-blox CFG-NAVSPG-DYNMODEL value for "Airborne <1g"
 static const uint8_t kGNSSDynModelAirborne1g = 6;
 
+// GURT-1: the module sends a satellite report with every navigation solution (1 s). One older than this
+// means it has stopped reporting, and the four signal values are logged as missing.
+static const uint32_t kGNSSSignalCurrentMs = 5000;
+
 // Define our class static variables - allocs storage for them
 
 #define kGNSSAddressDefault 0x42 // GNSS_ADDR
@@ -48,7 +52,9 @@ flxRegisterDevice(flxDevGNSS);
 // Object constructor. Performs initialization of device values, including device identifiers (name, I2C address),
 // and managed properties.
 
-flxDevGNSS::flxDevGNSS() : _bPPSLoggingEnabled{false}, _ppsPin{0}, _ppsLoggingIsSetup{false}
+flxDevGNSS::flxDevGNSS()
+    : _bPPSLoggingEnabled{false}, _ppsPin{0}, _ppsLoggingIsSetup{false}, _signalSeen{false}, _signalAt{0},
+      _satsInView{0}, _satsWithSignal{0}, _bestCN0{0}, _top4CN0{0}
 {
 
     // Setup unique identifiers for this device and basic device object systems
@@ -68,9 +74,8 @@ flxDevGNSS::flxDevGNSS() : _bPPSLoggingEnabled{false}, _ppsPin{0}, _ppsLoggingIs
     longitude.setPrecision(7);
     flxRegister(altitude, "Altitude (m)", "Altitude above geoid in meters", kParamValueAltitude);
     flxRegister(altitudeMSL, "Altitude MSL (m)", "Altitude above Mean Sea Level in meters");
-    flxRegister(SIV, "SIV", "Satellites In View");
+    flxRegister(SIV, "SIV", "Satellites used in the navigation solution");
     flxRegister(fixType, "Fix Type", "Fix Type");
-    flxRegister(carrierSolution, "Carrier Solution", "Carrier Solution");
     flxRegister(groundSpeed, "Ground Speed (m/s)", "Ground speed in meters per second");
     flxRegister(heading, "Heading (deg)", "Heading / course in degrees");
     flxRegister(PDOP, "PDOP", "Position Dilution Of Precision");
@@ -83,8 +88,21 @@ flxDevGNSS::flxDevGNSS() : _bPPSLoggingEnabled{false}, _ppsPin{0}, _ppsLoggingIs
     flxRegister(DDMMYYYY, "DDMMYYYY", "Date/Month/Year");
     flxRegister(HHMMSS, "HHMMSS", "Hour:Minute:Second");
     flxRegister(fixTypeStr, "Fix Type (String)", "Fix type in string format");
-    flxRegister(carrierSolutionStr, "Carrier Solution (String)", "Carrier solution in string format");
     flxRegister(location, "Location", "Location: (Lat,Lon)", kParamValueLocation);
+
+    // GURT-1: the carrier solution is not logged. This receiver has no RTK, so it is always "none" (0), and
+    // its slot in the downlink carries the signal values below instead.
+
+    // GURT-1: the receiver's own view of the sky, so a missing fix can be told apart from a weak sky, a bad
+    // antenna or a silent module. Missing (null) while no satellite report is current.
+    flxRegister(satsInView, "Sats In View", "Satellites heard or known to be above the horizon");
+    satsInView.setPrecision(0);
+    flxRegister(satsWithSignal, "Sats With Signal", "Satellites in that report with a signal (C/N0 above 0)");
+    satsWithSignal.setPrecision(0);
+    flxRegister(bestCN0, "Best C/N0 (dB-Hz)", "Strongest signal; 0 when no satellite has one");
+    bestCN0.setPrecision(0);
+    flxRegister(top4CN0, "Top 4 C/N0 (dB-Hz)", "Mean of the four strongest signals, or of fewer; 0 with none");
+    top4CN0.setPrecision(1);
 
     // Register read-write properties
     flxRegister(measurementRate, "Measurement Rate (ms)", "Set the measurement interval in milliseconds");
@@ -217,6 +235,8 @@ bool flxDevGNSS::onInitialize(TwoWire &wirePort)
         else
             flxLog_W(F("%s: dynamic model is %u, expected %u - fixes will stop above 12 km"), name(), dynModel,
                      kGNSSDynModelAirborne1g);
+
+        enableSignalReport();
 
         // Enable our update job
         flxAddJobToQueue(_theJob);
@@ -403,6 +423,78 @@ std::string flxDevGNSS::read_carrier_soln_string()
     return theString;
 }
 
+// GURT-1: ask for a satellite report (UBX-NAV-SAT) with every navigation solution, and report what the module
+// holds. One key, in RAM and battery-backed RAM like the dynamic model, so a module-only reset keeps it. The
+// library parses each report into its own heap buffer, allocated here, as checkUblox() meets it. getNAVSAT() is
+// never called: it asks for the report into the library's 276-byte command buffer, which a report of more than
+// 22 satellites overflows and drops.
+void flxDevGNSS::enableSignalReport(void)
+{
+    SFE_UBLOX_GNSS::setVal8(UBLOX_CFG_MSGOUT_UBX_NAV_SAT_I2C, 1, VAL_LAYER_RAM | VAL_LAYER_BBR);
+    SFE_UBLOX_GNSS::assumeAutoNAVSAT(true, false);
+
+    uint8_t rate = SFE_UBLOX_GNSS::getVal8(UBLOX_CFG_MSGOUT_UBX_NAV_SAT_I2C, VAL_LAYER_RAM);
+    if (rate == 1 && SFE_UBLOX_GNSS::packetUBXNAVSAT != nullptr)
+        flxLog_I(F("%s: satellite report every solution"), name());
+    else
+        flxLog_W(F("%s: satellite report rate is %u, expected 1 - no signal values will be logged"), name(), rate);
+}
+
+void flxDevGNSS::summariseSignal(const UBX_NAV_SAT_data_t &report, uint8_t &inView, uint8_t &withSignal, float &best,
+                                 float &top4)
+{
+    uint8_t strongest[4] = {0, 0, 0, 0}; // highest first
+    inView = 0;
+    withSignal = 0;
+    for (uint16_t i = 0; i < report.header.numSvs && i < UBX_NAV_SAT_MAX_BLOCKS; i++)
+    {
+        // In view: heard, or known to be above the horizon. The report also lists satellites the receiver is
+        // only searching for, with no signal and an unknown (out-of-range) elevation; those are not in view.
+        uint8_t cno = report.blocks[i].cno;
+        int8_t elev = report.blocks[i].elev;
+        if (cno > 0 || (elev >= 0 && elev <= 90))
+            inView++;
+        if (cno == 0)
+            continue;
+        withSignal++;
+        for (int k = 0; k < 4; k++)
+            if (cno > strongest[k])
+            {
+                for (int j = 3; j > k; j--)
+                    strongest[j] = strongest[j - 1];
+                strongest[k] = cno;
+                break;
+            }
+    }
+    uint8_t n = withSignal < 4 ? withSignal : 4;
+    uint16_t sum = 0;
+    for (uint8_t k = 0; k < n; k++)
+        sum += strongest[k];
+    best = strongest[0];
+    top4 = n ? (float)sum / n : 0.0f;
+}
+
+bool flxDevGNSS::signalCurrent(void)
+{
+    return _signalSeen && (uint32_t)(millis() - _signalAt) <= kGNSSSignalCurrentMs;
+}
+float flxDevGNSS::read_sats_in_view()
+{
+    return signalCurrent() ? _satsInView : NAN;
+}
+float flxDevGNSS::read_sats_with_signal()
+{
+    return signalCurrent() ? _satsWithSignal : NAN;
+}
+float flxDevGNSS::read_best_cn0()
+{
+    return signalCurrent() ? _bestCN0 : NAN;
+}
+float flxDevGNSS::read_top4_cn0()
+{
+    return signalCurrent() ? _top4CN0 : NAN;
+}
+
 // method for location
 bool flxDevGNSS::get_location(flxDataArrayFloat *arrLocation)
 {
@@ -436,6 +528,9 @@ void flxDevGNSS::factory_default()
     SFE_UBLOX_GNSS::setAutoPVT(true);
     SFE_UBLOX_GNSS::saveConfigSelective(VAL_CFG_SUBSEC_IOPORT | VAL_CFG_SUBSEC_MSGCONF);
 
+    // GURT-1: the factory default also stopped the satellite report; ask for it again (see onInitialize()).
+    enableSignalReport();
+
     // GURT-1: the factory default restored the "Portable" model; select airborne again (see onInitialize()).
     SFE_UBLOX_GNSS::setVal8(UBLOX_CFG_NAVSPG_DYNMODEL, kGNSSDynModelAirborne1g, VAL_LAYER_RAM | VAL_LAYER_BBR);
 }
@@ -446,6 +541,15 @@ void flxDevGNSS::factory_default()
 void flxDevGNSS::jobHandlerCB(void)
 {
     SFE_UBLOX_GNSS::checkUblox();
+
+    // GURT-1: summarise each new satellite report once; the logger reads the summary.
+    if (SFE_UBLOX_GNSS::packetUBXNAVSAT != nullptr && SFE_UBLOX_GNSS::packetUBXNAVSAT->moduleQueried)
+    {
+        SFE_UBLOX_GNSS::packetUBXNAVSAT->moduleQueried = false;
+        summariseSignal(SFE_UBLOX_GNSS::packetUBXNAVSAT->data, _satsInView, _satsWithSignal, _bestCN0, _top4CN0);
+        _signalAt = millis();
+        _signalSeen = true;
+    }
 
     // PPS Event triggered?
     if (_ppsLoggingIsSetup && _pps_triggered)
